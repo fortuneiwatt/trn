@@ -1,0 +1,384 @@
+// TRN v3: schema. Money is BigInt in MINOR units (kobo / token minor units).
+// Constraints Prisma cannot express (partial indexes, append-only triggers,
+// CHECKs, RLS) live in prisma/sql/*.sql and are applied as raw migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Rail {
+  BANK
+  CHAIN
+}
+
+enum AttemptStatus {
+  INITIATED
+  PENDING
+  CONFIRMING
+  UNKNOWN
+  SUCCESS
+  FAILED
+  REVERSAL_PENDING
+  REVERSED
+}
+
+enum EventSource {
+  PROVIDER_WEBHOOK
+  PROVIDER_REQUERY
+  CHAIN_OBSERVER
+  TRN_TIMEOUT
+  MERCHANT_CLAIM
+  CUSTOMER_PROOF
+}
+
+enum EventOutcome {
+  APPLIED
+  NOOP
+  REJECTED
+  STALE
+}
+
+enum VerdictCode {
+  SAFE_TO_SHIP
+  PAID_LATE_RATE_CHANGED
+  REFUND_IN_PROGRESS
+  WAIT
+  CONFIRMING
+  PARTIAL_PAYMENT
+  WRONG_ASSET
+  UNVERIFIED_PROOF
+  SAFE_TO_RETRY
+  EXPIRED
+  AWAITING_PAYMENT
+}
+
+enum ChainTransferStatus {
+  SEEN
+  CONFIRMED
+  REORGED
+}
+
+enum ProofMatch {
+  MATCHED
+  NO_MATCH
+  INCONCLUSIVE
+}
+
+enum ReconStatus {
+  OPEN
+  VERIFYING
+  ESCALATED
+  RESOLVED
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  DEAD
+}
+
+// ---------------------------------------------------------------- tenancy
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  apiKeys          ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+  orders           Order[]
+
+  @@map("tenants")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  tenantId   String
+  name       String
+  prefix     String    @unique // shown in UI, e.g. "trn_live_ab12cd"
+  keyHash    String // SHA-256 of the secret part. The raw key is shown once.
+  lastUsedAt DateTime? @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+model WebhookEndpoint {
+  id               String   @id @default(uuid())
+  tenantId         String
+  url              String
+  secretCiphertext String // encrypted at rest (envelope key from env/KMS), never plaintext
+  secretVersion    Int      @default(1)
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant     Tenant            @relation(fields: [tenantId], references: [id])
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId])
+  @@map("webhook_endpoints")
+}
+
+// ---------------------------------------------------------------- orders & payments
+
+model Order {
+  id                String      @id @default(uuid())
+  tenantId          String
+  merchantReference String
+  amountKobo        BigInt
+  currency          String      @default("NGN")
+  tokenSymbol       String? // null = stablecoin not offered
+  tokenAmountMinor  BigInt? // quoted at the locked rate, rounded UP
+  rateKoboPerToken  BigInt?
+  expiresAt         DateTime    @db.Timestamptz(6)
+  verdict           VerdictCode @default(AWAITING_PAYMENT) // CACHE of evaluateVerdict(), never the source of truth
+  verdictUpdatedAt  DateTime    @default(now()) @db.Timestamptz(6)
+  metadata          Json        @default("{}")
+  createdAt         DateTime    @default(now()) @db.Timestamptz(6)
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id])
+  attempts     PaymentAttempt[]
+  proofs       ProofSubmission[]
+  paymentEvents PaymentEvent[]
+
+  @@unique([tenantId, merchantReference])
+  @@index([tenantId, createdAt])
+  @@map("orders")
+}
+
+model PaymentAttempt {
+  id                   String        @id @default(uuid())
+  tenantId             String
+  orderId              String
+  rail                 Rail
+  status               AttemptStatus @default(INITIATED)
+  receivedAmountMinor  BigInt?
+  paidAt               DateTime?     @db.Timestamptz(6) // chain: BLOCK timestamp
+  assetMismatch        Boolean       @default(false)
+  providerRef          String? // bank rail: provider's transaction/session reference
+  depositAddress       String? // chain rail: per-order address derived from the seller's public key
+  lastAuthoritativeAt  DateTime?     @db.Timestamptz(6)
+  lastSequenceBySource Json          @default("{}")
+  statusChangedAt      DateTime      @default(now()) @db.Timestamptz(6)
+  version              Int           @default(0) // optimistic lock
+  createdAt            DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime      @updatedAt @db.Timestamptz(6)
+
+  order          Order                @relation(fields: [orderId], references: [id])
+  events         PaymentEvent[]
+  chainTransfers ChainTransfer[]
+  reconCases     ReconciliationCase[]
+
+  @@unique([rail, providerRef]) // NULLs are distinct in Postgres: only set refs are constrained
+  @@unique([depositAddress])
+  @@index([orderId])
+  @@index([tenantId, status])
+  @@map("payment_attempts")
+}
+
+/// APPEND-ONLY. Every inbound claim is stored, even rejected / stale / duplicate ones.
+/// Enforced by trigger (see prisma/sql/001_constraints.sql).
+model PaymentEvent {
+  id              String       @id @default(uuid())
+  tenantId        String
+  orderId         String
+  attemptId       String
+  source          EventSource
+  fromStatus      AttemptStatus?
+  toStatus        AttemptStatus
+  outcome         EventOutcome
+  reason          String?
+  anomaly         Boolean      @default(false)
+  externalEventId String? // provider's own event id, for dedupe
+  sourceSequence  Int?
+  amountMinor     BigInt?
+  occurredAt      DateTime     @db.Timestamptz(6)
+  receivedAt      DateTime     @default(now()) @db.Timestamptz(6)
+  payload         Json         @default("{}")
+
+  order   Order          @relation(fields: [orderId], references: [id])
+  attempt PaymentAttempt @relation(fields: [attemptId], references: [id])
+
+  @@unique([attemptId, source, externalEventId])
+  @@index([attemptId, receivedAt])
+  @@index([tenantId, receivedAt])
+  @@map("payment_events")
+}
+
+// ---------------------------------------------------------------- chain
+
+model ChainTransfer {
+  id             String              @id @default(uuid())
+  tenantId       String? // null until matched to a deposit address
+  attemptId      String?
+  chain          String // e.g. "evm:31337", "evm:11155111"
+  tokenContract  String
+  fromAddress    String
+  toAddress      String
+  amountMinor    BigInt
+  txHash         String
+  logIndex       Int
+  blockNumber    BigInt
+  blockHash      String
+  blockTimestamp DateTime            @db.Timestamptz(6)
+  confirmations  Int                 @default(0)
+  status         ChainTransferStatus @default(SEEN)
+  firstSeenAt    DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
+
+  attempt PaymentAttempt? @relation(fields: [attemptId], references: [id])
+
+  @@unique([chain, txHash, logIndex]) // a chain log is processed exactly once
+  @@index([toAddress])
+  @@index([attemptId])
+  @@map("chain_transfers")
+}
+
+/// Watcher resume point + reorg detection (compare stored hash with the node's).
+model ChainCursor {
+  chain                String   @id
+  lastProcessedBlock   BigInt
+  lastProcessedBlockHash String
+  updatedAt            DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("chain_cursors")
+}
+
+// ---------------------------------------------------------------- proofs & reconciliation
+
+model ProofSubmission {
+  id               String     @id @default(uuid())
+  tenantId         String
+  orderId          String
+  storageKey       String
+  extracted        Json       @default("{}") // amount, reference, bank, time (advisory OCR output)
+  matchResult      ProofMatch @default(INCONCLUSIVE)
+  matchedAttemptId String?
+  createdAt        DateTime   @default(now()) @db.Timestamptz(6)
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@map("proof_submissions")
+}
+
+model ReconciliationCase {
+  id          String      @id @default(uuid())
+  tenantId    String
+  attemptId   String
+  status      ReconStatus @default(OPEN)
+  reason      String // UNKNOWN_STATUS | PENDING_PAST_SLA | PROVIDER_CONFLICT
+  attemptsMade Int        @default(0)
+  nextCheckAt DateTime?   @db.Timestamptz(6)
+  openedAt    DateTime    @default(now()) @db.Timestamptz(6)
+  escalatedAt DateTime?   @db.Timestamptz(6)
+  resolvedAt  DateTime?   @db.Timestamptz(6)
+  resolution  String?
+
+  attempt      PaymentAttempt        @relation(fields: [attemptId], references: [id])
+  verifications VerificationAttempt[]
+
+  @@index([status, nextCheckAt]) // the worker's polling query
+  @@map("reconciliation_cases")
+}
+
+model VerificationAttempt {
+  id          String   @id @default(uuid())
+  caseId      String
+  startedAt   DateTime @default(now()) @db.Timestamptz(6)
+  conclusive  Boolean // "not found" is INCONCLUSIVE, never proof of failure
+  resultStatus AttemptStatus?
+  rawResponse Json     @default("{}")
+
+  reconCase ReconciliationCase @relation(fields: [caseId], references: [id])
+
+  @@index([caseId])
+  @@map("verification_attempts")
+}
+
+// ---------------------------------------------------------------- reliability plumbing
+
+/// Transactional outbox: written in the SAME DB transaction as the state change.
+/// A relay publishes rows with publishedAt IS NULL using FOR UPDATE SKIP LOCKED.
+model Outbox {
+  id            BigInt    @id @default(autoincrement()) // monotonic = ordered
+  tenantId      String
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  publishedAt   DateTime? @db.Timestamptz(6)
+
+  @@map("outbox")
+}
+
+model WebhookDelivery {
+  id             String         @id @default(uuid())
+  tenantId       String
+  endpointId     String
+  eventId        String // stable across retries; receivers dedupe on it
+  eventType      String
+  payload        Json
+  status         DeliveryStatus @default(PENDING)
+  attemptCount   Int            @default(0)
+  nextAttemptAt  DateTime?      @db.Timestamptz(6)
+  lastResponseCode Int?
+  lastError      String?
+  deliveredAt    DateTime?      @db.Timestamptz(6)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id])
+
+  @@unique([endpointId, eventId])
+  @@index([status, nextAttemptAt])
+  @@map("webhook_deliveries")
+}
+
+model IdempotencyKey {
+  id             String    @id @default(uuid())
+  tenantId       String
+  key            String
+  method         String
+  path           String
+  requestHash    String
+  responseStatus Int? // null = first request still in flight
+  responseBody   Json?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt      DateTime  @db.Timestamptz(6)
+
+  @@unique([tenantId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+/// APPEND-ONLY, hash-chained. Enforced by trigger.
+model AuditLog {
+  id           BigInt   @id @default(autoincrement())
+  tenantId     String?
+  actorType    String // API_KEY | USER | SYSTEM
+  actorId      String
+  action       String
+  resourceType String
+  resourceId   String
+  requestId    String?
+  metadata     Json     @default("{}")
+  prevHash     String?
+  hash         String
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([tenantId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}

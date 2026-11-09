@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TRN: payment verdicts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=Public+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#e9eef4;--panel:#f7f9fb;--ink:#14202b;--muted:#566574;--line:#c6d1dc;--green:#0e7a56;--amber:#935500;--red:#b3261e;--blue:#2457c5;--grey:#566574;
+--head:'Bricolage Grotesque','Segoe UI',system-ui,sans-serif;--body:'Public Sans','Segoe UI',system-ui,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--body)}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+header{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center;padding:14px 24px;background:var(--ink);color:#fff}
+header b{font:800 22px var(--head);letter-spacing:.02em}
+.notice{font-size:13px;color:#c9d6e2;flex:1;min-width:220px}
+.clock{display:flex;gap:8px;align-items:center;font-size:13px}
+.clock button,.seed{border:1px solid #6d7f90;background:transparent;color:#fff;border-radius:6px;padding:4px 10px}
+.seed{background:#fff;color:var(--ink);font-weight:600}
+main{display:grid;grid-template-columns:260px minmax(0,1fr) 300px;gap:0;min-height:calc(100vh - 56px - 150px)}
+nav,aside{padding:16px;border-right:1px solid var(--line)}
+aside{border-right:0;border-left:1px solid var(--line);background:var(--panel)}
+section{padding:24px 32px}
+nav button{display:grid;grid-template-columns:12px 1fr;gap:2px 10px;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);background:transparent;padding:12px 4px}
+nav button[aria-current=true]{background:var(--panel);box-shadow:inset 3px 0 0 var(--ink)}
+nav .dot{width:10px;height:10px;border-radius:50%;margin-top:6px;grid-row:span 2}
+nav small,.muted{color:var(--muted)}
+.verdict{border-left:8px solid var(--tone);padding:4px 0 4px 20px;margin-bottom:24px}
+.verdict h1{font:800 clamp(2.2rem,5vw,3.8rem)/1.05 var(--head);margin:0;color:var(--tone)}
+.verdict p{margin:8px 0 0;max-width:60ch}
+.rules{display:flex;gap:20px;margin-top:10px;font-weight:600;font-size:14px}
+.flag{display:inline-block;margin-top:8px;padding:2px 8px;border:1px solid var(--red);color:var(--red);border-radius:4px;font-size:13px;font-weight:600}
+h2{font:600 16px var(--head);margin:28px 0 8px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--muted)}
+ol{list-style:none;margin:0;padding:0;font-size:14px}
+li{display:grid;grid-template-columns:74px 1fr;gap:10px;padding:7px 0;border-bottom:1px solid var(--line)}
+.pill{display:inline-block;padding:0 7px;border-radius:10px;font-size:12px;font-weight:600;background:#dde5ed;margin-left:6px}
+.pill.bad{background:#f6d9d6;color:var(--red)}.pill.ok{background:#d3ece3;color:var(--green)}
+aside h3{font:600 14px var(--head);margin:18px 0 8px}
+aside h3:first-child{margin-top:0}
+aside .btns{display:flex;flex-direction:column;gap:6px}
+aside button{border:1px solid var(--ink);background:#fff;border-radius:6px;padding:7px 10px;text-align:left}
+aside button.warn{border-color:var(--red);color:var(--red)}
+.tag{font-size:12px;color:var(--amber);font-weight:600}
+footer{border-top:1px solid var(--line);padding:16px 24px;background:var(--panel);font-size:14px}
+footer h2{margin:0 0 8px}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:8px 14px;border-radius:6px;display:none}
+.empty{color:var(--muted);padding:40px 0}
+@media(max-width:900px){main{grid-template-columns:1fr}nav,aside{border:0;border-bottom:1px solid var(--line)}section{padding:20px 16px}}
+</style>
+</head>
+<body>
+<header>
+  <b>TRN</b>
+  <span class="notice">Simulated demo. No real money, banks or blockchains. Bank and chain events come from the simulator panel and use the same code path real integrations will.</span>
+  <span class="clock">Demo time <b id="now">--:--:--</b>
+    <button data-p="/sim/tick" data-b='{"minutes":5}'>+5 min</button>
+    <button data-p="/sim/tick" data-b='{"minutes":31}'>+31 min</button>
+    <button data-p="/sim/tick" data-b='{"minutes":61}'>+1 hour</button>
+  </span>
+  <button class="seed" data-p="/sim/seed">Load demo orders</button>
+</header>
+<main>
+  <nav id="list" aria-label="Orders"></nav>
+  <section id="detail"></section>
+  <aside id="sim" aria-label="Simulator"></aside>
+</main>
+<footer><h2>Seller's webhook inbox</h2><div id="inbox" class="muted">Nothing received yet.</div></footer>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const V={
+SAFE_TO_SHIP:['Safe to ship','var(--green)','A verified payment covers the amount due.'],
+WAIT:['Wait','var(--amber)','A payment may be in progress. Hold the goods and do not let the customer pay again.'],
+CONFIRMING:['Confirming','var(--blue)','Seen on-chain. Waiting for enough confirmations before it counts.'],
+PARTIAL_PAYMENT:['Partly paid','var(--red)','The verified amount is less than the amount due. Ask for the difference.'],
+WRONG_ASSET:['Wrong token or network','var(--red)','A transfer used a token or network we do not accept. Do not ship. Guide the customer.'],
+UNVERIFIED_PROOF:['Proof not verified','var(--red)','A screenshot was sent, but it matches no verified payment. Do not ship.'],
+SAFE_TO_RETRY:['Safe to retry','var(--blue)','Earlier attempts are confirmed failed or reversed. The customer may pay again.'],
+PAID_LATE_RATE_CHANGED:['Paid late','var(--amber)','The stablecoin payment arrived after the quote expired. You decide: accept or refund.'],
+REFUND_IN_PROGRESS:['Refund in progress','var(--amber)','Funds are on their way back to the customer.'],
+EXPIRED:['Expired','var(--grey)','The order expired with no verified payment.'],
+AWAITING_PAYMENT:['Awaiting payment','var(--grey)','No payment attempt yet.']};
+const SRC={PROVIDER_WEBHOOK:'Bank provider webhook',PROVIDER_REQUERY:'TRN asked the provider',CHAIN_OBSERVER:'Chain watcher',TRN_TIMEOUT:'TRN timeout rule',MERCHANT_CLAIM:'Seller claim',CUSTOMER_PROOF:'Customer screenshot'};
+const WHY={DUPLICATE_EXTERNAL_EVENT:'this exact webhook was already received',TERMINAL_STATE:'Already final, not changed',ILLEGAL_TRANSITION:'Not allowed from this state',SOURCE_NOT_AUTHORITATIVE:'This source cannot change the payment',OLDER_THAN_LAST_AUTHORITATIVE_EVENT:'Older than what we already know',AMOUNT_REQUIRED_FOR_SUCCESS:'Success without an amount rejected',ALREADY_IN_STATUS:'No change',WRONG_NETWORK:'Wrong network',UNSUPPORTED_TOKEN:'Token not accepted'};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const naira=k=>{const n=BigInt(k);const f=n%100n;return '₦'+(n/100n).toLocaleString('en-NG')+(f?'.'+String(f).padStart(2,'0'):'')};
+const usdt=m=>(Number(BigInt(m))/1e6).toFixed(2)+' USDT';
+const t=d=>new Date(d).toLocaleTimeString('en-GB');
+let S=null,sel=null,last='';
+async function post(p,b){
+  try{
+    const r=await fetch(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b||{})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)toast((j.error&&j.error.message)||'Request failed');
+    else if(j&&j.outcome&&j.outcome!=='APPLIED')toast(({NOOP:'Ignored',REJECTED:'Rejected',STALE:'Ignored as out of date'}[j.outcome]||j.outcome)+': '+(WHY[j.reason]||j.reason||'no change')+(j.anomaly?'. Conflict escalated for review.':''));
+    await load();return j}
+  catch{toast('Could not reach the server')}}
+function toast(m){const e=$('#toast');e.textContent=m;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',3500)}
+async function load(){
+  let j;try{j=await (await fetch('/demo/state')).json()}catch{return}
+  S=j;$('#now').textContent=t(S.now);
+  const {now,...rest}=j;const raw=JSON.stringify(rest);
+  if(raw===last)return;last=raw; // re-render only when something real changed, so clicks are never swallowed
+  if(!sel||!S.orders.find(o=>o.order.id===sel))sel=S.orders.length?S.orders[S.orders.length-1].order.id:null;
+  render()}
+function render(){
+  $('#now').textContent=t(S.now);
+  $('#list').innerHTML=S.orders.length?[...S.orders].reverse().map(o=>{const v=V[o.verdict.verdict];
+    return `<button data-sel="${o.order.id}" aria-current="${o.order.id===sel}"><span class="dot" style="background:${v[1]}"></span><b>${esc(o.order.merchantReference)}</b><small>${naira(o.order.amountKobo)} · ${v[0]}</small></button>`}).join(''):'<p class="empty">No orders yet.</p>';
+  const o=S.orders.find(x=>x.order.id===sel);
+  if(!o){$('#detail').innerHTML='<p class="empty">Load the demo orders to begin.</p>';$('#sim').innerHTML='';}
+  else{detail(o);sim(o)}
+  const ib=S.inbox;$('#inbox').innerHTML=ib.length?ib.map(i=>`<div>${t(i.at)} · <b>${esc(i.eventType)}</b> · ${esc(i.data.merchantReference||'')} ${i.data.verdict?'→ '+esc(i.data.verdict):''} <span class="pill ok">signature verified</span>${i.duplicate?'<span class="pill">duplicate</span>':''}</div>`).join(''):'Nothing received yet.'}
+function detail(o){
+  const v=V[o.verdict.verdict],vd=o.verdict;
+  const rows=o.attempts.map(a=>`<tr><td>${a.rail==='BANK'?'Bank transfer':'Stablecoin'}</td><td>${a.assetMismatch?'<b>Not accepted</b> <span class="pill bad">wrong token or network</span>':'<b>'+a.status+'</b>'}</td><td>${a.receivedAmountMinor!==null?(a.rail==='BANK'?naira(a.receivedAmountMinor):usdt(a.receivedAmountMinor)):'None verified'}</td><td class="muted">${esc(a.providerRef||(a.depositAddress||'').slice(0,12)+'…')}</td></tr>`).join('');
+  const tl=o.timeline.map(e=>`<li><span class="muted">${t(e.receivedAt)}</span><span>${SRC[e.source]}: ${e.fromStatus===e.toStatus?e.toStatus:e.fromStatus+' → '+e.toStatus}<span class="pill ${e.outcome==='APPLIED'?'ok':e.anomaly||e.outcome==='REJECTED'?'bad':''}">${e.outcome==='APPLIED'?'applied':e.outcome.toLowerCase()}</span>${e.reason&&e.outcome!=='APPLIED'?' <span class="muted">'+esc(WHY[e.reason]||e.reason)+'</span>':e.reason?' <span class="muted">'+esc(WHY[e.reason]||e.reason)+'</span>':''}${e.anomaly?' <b style="color:var(--red)">Conflict escalated</b>':''}</span></li>`).join('');
+  const pr=o.proofs.map(p=>`<li><span class="muted">${t(p.createdAt)}</span><span>Screenshot for ${p.amountKobo!==null?naira(p.amountKobo):'a payment'} <span class="pill ${p.matchResult==='MATCHED'?'ok':'bad'}">${p.matchResult==='MATCHED'?'matches a verified payment':'no match'}</span> <span class="muted">${esc(p.note)}</span></span></li>`).join('');
+  const cs=o.cases.map(c=>`<p><b>Reconciliation ${c.status.toLowerCase()}</b> (${esc(c.reason)}). Checks made: ${c.attemptsMade}.${c.nextCheckAt?' Next check at '+t(c.nextCheckAt)+'.':''}</p>`).join('');
+  $('#detail').innerHTML=`<div class="verdict" style="--tone:${v[1]}"><h1>${v[0]}</h1><p>${v[2]}</p>
+  <div class="rules"><span>Ship the goods: ${vd.canFulfil?'yes':'no'}</span><span>Allow another payment: ${vd.blockRetry?'no':'yes'}</span></div>
+  ${vd.flags.map(f=>`<span class="flag">${f==='POSSIBLE_DUPLICATE_PAYMENT'?'Possible double payment: check for a refund':esc(f)}</span>`).join('')}</div>
+  <p class="muted">${esc(o.order.merchantReference)} · ${naira(o.order.amountKobo)}${o.order.tokenAmountMinor?' or '+usdt(o.order.tokenAmountMinor)+' (quote locked until '+t(o.order.expiresAt)+')':''}</p>
+  ${cs}
+  <h2>Payment attempts</h2>${rows?`<table><tr><th>Rail</th><th>Status</th><th>Verified amount</th><th>Reference</th></tr>${rows}</table>`:'<p class="muted">None yet.</p>'}
+  <h2>What happened, in order</h2>${tl||pr?`<ol>${tl}${pr}</ol>`:'<p class="muted">Nothing yet.</p>'}`}
+function btn(p,b,label,cls){return `<button class="${cls||''}" data-p="${p}" data-b='${JSON.stringify(b||{})}'>${label}</button>`}
+function sim(o){
+  const id=o.order.id;let h=`<h3>Customer</h3><div class="btns">`;
+  h+=btn(`/sim/orders/${id}/attempt`,{rail:'BANK'},'Starts a bank transfer');
+  if(o.order.tokenAmountMinor)h+=btn(`/sim/orders/${id}/attempt`,{rail:'CHAIN'},'Starts a stablecoin payment');
+  h+=btn(`/sim/orders/${id}/proof`,{amountKobo:o.order.amountKobo},'Sends a payment screenshot')+`</div>`;
+  o.attempts.filter(a=>!a.assetMismatch).forEach(a=>{
+    if(a.rail==='BANK'){const pa=S.providerAnswers[a.attemptId];
+      h+=`<h3>Bank provider <span class="tag">simulated</span></h3><div class="btns">`+
+      btn(`/sim/bank/${a.attemptId}/pending`,0,'Says: pending')+btn(`/sim/bank/${a.attemptId}/success`,0,'Says: success')+btn(`/sim/bank/${a.attemptId}/failed`,0,'Says: failed')+
+      btn(`/sim/bank/${a.attemptId}/replay`,0,'Sends the same webhook again')+btn(`/sim/bank/${a.attemptId}/conflict`,0,'Later contradicts itself','warn')+
+      `</div><h3>When TRN asks the provider</h3><div class="btns">`+
+      btn(`/sim/provider/${a.attemptId}/success`,0,'Provider answers: success')+btn(`/sim/provider/${a.attemptId}/notfound`,0,'Provider answers: no record')+
+      `</div><p class="muted">Current answer: ${pa?(pa.found?pa.status.toLowerCase():'no record'):'no record'}</p>`}
+    else h+=`<h3>Blockchain <span class="tag">simulated</span></h3><div class="btns">`+
+      btn(`/sim/chain/${a.attemptId}/seen`,0,'Full transfer appears')+btn(`/sim/chain/${a.attemptId}/under`,0,'Underpaid transfer appears')+btn(`/sim/chain/${a.attemptId}/wrong`,0,'Wrong token arrives')+
+      btn(`/sim/chain/${a.attemptId}/confirm`,0,'New block (+1 confirmation)')+btn(`/sim/chain/${a.attemptId}/reorg`,0,'Chain reorganises','warn')+`</div><p class="muted">3 confirmations needed.</p>`});
+  $('#sim').innerHTML=h}
+document.addEventListener('click',e=>{
+  const s=e.target.closest('[data-sel]');if(s){sel=s.dataset.sel;render();return}
+  const b=e.target.closest('[data-p]');if(b){const raw=b.dataset.b;post(b.dataset.p,raw&&raw!=='0'?JSON.parse(raw):{})}});
+load();setInterval(load,1000);
+</script>
+</body>
+</html>

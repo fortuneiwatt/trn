@@ -1,0 +1,25 @@
+# Postgres only for the MVP. Redis / RabbitMQ are deliberately absent: the DB outbox
+# and DB-backed job tables carry the demo. Add them in Phase B if load demands it.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: trn
+      POSTGRES_PASSWORD: trn_dev_only
+      POSTGRES_DB: trn
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trn"]
+      interval: 5s
+      retries: 10
+
+  # Local EVM chain for a reliable offline demo (no faucet, no flaky public RPC).
+  # Deploy a 6-decimal mock USDT to it, or point CHAIN_RPC_URL at Sepolia instead.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--block-time", "2"]
+    ports: ["8545:8545"]
+
+volumes:
+  pgdata:
